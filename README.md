@@ -6,7 +6,7 @@ This is a Packer plugin for installing Windows updates (akin to [rgl/vagrant-win
 
 **NB** This was only tested with Packer 1.14.1 and the images at [rgl/windows-vagrant](https://github.com/rgl/windows-vagrant), so YMMV.
 
-# Usage
+## Usage
 
 Configure your packer template to require a [release version of the plugin](https://github.com/rgl/packer-plugin-windows-update/releases), e.g.:
 
@@ -38,18 +38,38 @@ build {
 
 Note, the plugin automatically restarts the machine after Windows Updates are applied.  The reboots occur similar to the windows-restart provisioner built into packer where packer is aware that a shutdown is in progress.
 
+The provisioner also detects repeated update-loop rounds (the same update set appearing across consecutive rounds) and fails fast with a clear error instead of rebooting indefinitely.
+
+Internally, the embedded PowerShell updater uses these exit statuses:
+
+- `0`: no restart pending / update round complete
+- `101` (and `2147942501` on Windows 2012): restart pending
+- `102`: repeated update loop detected
+
+## Recent Changes
+
+For a running record of plugin updates, see [CHANGELOG.md](CHANGELOG.md).
+
+Recent hardening changes include:
+
+- Per-update install result diagnostics with curated WUA HRESULT messages.
+- Install queue ordering for servicing stack updates, exclusive updates, then regular updates.
+- Bounded retry/backoff behavior for search and download operations.
+- Update-loop detection with dedicated exit status `102`.
+- Per-run loop-state isolation via `-UpdateRunID` to avoid cross-build contamination.
+
 ## Search Criteria, Filters and Update Limit
 
 You can select which Windows Updates are installed by defining the search criteria, a set of filters, and how many updates are installed at a time.
 
 Normally you would use one of the following settings:
 
-| Name          | `search_criteria`                           | `filters`       |
-|---------------|---------------------------------------------|-----------------|
-| Important     | `AutoSelectOnWebSites=1 and IsInstalled=0`  | `$true`         |
-| Recommended   | `BrowseOnly=0 and IsInstalled=0`            | `$true`         |
-| All           | `IsInstalled=0`                             | `$true`         |
-| Optional Only | `AutoSelectOnWebSites=0 and IsInstalled=0`  | `$_.BrowseOnly` |
+| Name          | `search_criteria`                          | `filters`       |
+| ------------- | ------------------------------------------ | --------------- |
+| Important     | `AutoSelectOnWebSites=1 and IsInstalled=0` | `$true`         |
+| Recommended   | `BrowseOnly=0 and IsInstalled=0`           | `$true`         |
+| All           | `IsInstalled=0`                            | `$true`         |
+| Optional Only | `AutoSelectOnWebSites=0 and IsInstalled=0` | `$_.BrowseOnly` |
 
 **NB** `Recommended` is the default setting.
 
@@ -74,7 +94,9 @@ build {
 
 The general filter syntax is:
 
-    ACTION:EXPRESSION
+```bash
+ACTION:EXPRESSION
+```
 
 `ACTION` is a string that can have one of the following values:
 
@@ -90,14 +112,14 @@ The general filter syntax is:
 
 Inside an expression, the Windows Update [IUpdate interface](https://msdn.microsoft.com/en-us/library/windows/desktop/aa386099(v=vs.85).aspx) can be referenced by the `$_` variable.
 
-# Development
+## Development
 
 Install the dependencies:
 
-* [Docker](https://docs.docker.com/engine/install/).
-* [Visual Studio Code](https://code.visualstudio.com).
-* [Dev Container plugin](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers).
-* [`windows-2022-amd64` vagrant box](https://github.com/rgl/windows-vagrant).
+- [Docker](https://docs.docker.com/engine/install/).
+- [Visual Studio Code](https://code.visualstudio.com).
+- [Dev Container plugin](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers).
+- [`windows-2022-amd64` vagrant box](https://github.com/rgl/windows-vagrant).
 
 Open this directory with the Dev Container plugin.
 

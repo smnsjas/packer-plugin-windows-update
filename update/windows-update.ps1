@@ -28,12 +28,88 @@ param(
     [string]$SearchCriteria = 'BrowseOnly=0 and IsInstalled=0',
     [string[]]$Filters = @('include:$true'),
     [int]$UpdateLimit = 1000,
+    [string]$UpdateRunID = '',
     [switch]$OnlyCheckForRebootRequired = $false
 )
 
 $mock = $false
+$searchMaxRetries = 30
+$downloadMaxRetries = 30
+$retryBaseDelaySeconds = 5
+$retryMaxDelaySeconds = 60
+$updateLoopStatePath = 'C:\Windows\Temp\packer-windows-update-loop-state.json'
+$updateLoopMaxConsecutiveRounds = 3
+$exitCodeUpdateLoopDetected = 102
+
+if ($UpdateRunID) {
+    $safeUpdateRunID = $UpdateRunID -replace '[^a-zA-Z0-9._-]', '_'
+    $updateLoopStatePath = "C:\Windows\Temp\packer-windows-update-loop-state-$safeUpdateRunID.json"
+}
+
+function Write-LogInfo($message) {
+    Write-Output "INFO: $message"
+}
+
+function Write-LogWarn($message) {
+    Write-Output "WARN: $message"
+}
+
+function Write-LogError($message) {
+    Write-Output "ERROR: $message"
+}
+
+function Get-RetryDelaySeconds($attempt) {
+    $power = [Math]::Min($attempt - 1, 5)
+    $delay = $retryBaseDelaySeconds * [Math]::Pow(2, $power)
+    return [int][Math]::Min($delay, $retryMaxDelaySeconds)
+}
+
+function Get-UpdateIdentity($update) {
+    try {
+        if ($null -ne $update.Identity -and $update.Identity.UpdateID) {
+            return [string]$update.Identity.UpdateID
+        }
+    } catch {
+    }
+
+    return ("title::{0}" -f $update.Title)
+}
+
+function Get-UpdateLoopState {
+    if (!(Test-Path $updateLoopStatePath)) {
+        return $null
+    }
+
+    try {
+        return Get-Content -Raw $updateLoopStatePath | ConvertFrom-Json
+    } catch {
+        Write-LogWarn "Failed to read update loop state from '$updateLoopStatePath': $_"
+        return $null
+    }
+}
+
+function Set-UpdateLoopState($state) {
+    [System.IO.File]::WriteAllText(
+        $updateLoopStatePath,
+        ($state | ConvertTo-Json -Compress -Depth 10),
+        (New-Object System.Text.UTF8Encoding $false))
+}
+
+function Clear-UpdateLoopState {
+    if (Test-Path $updateLoopStatePath) {
+        Remove-Item -Force $updateLoopStatePath
+    }
+}
 
 function ExitWithCode($exitCode) {
+    if ($exitCode -ne 101) {
+        try {
+            Clear-UpdateLoopState
+        } catch {
+            Write-LogWarn "Failed to clear update loop state '$updateLoopStatePath': $_"
+        }
+    }
+
     $host.SetShouldExit($exitCode)
     Write-Output "Exiting with code $exitCode"
     Exit
@@ -43,10 +119,16 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 trap {
-    Write-Output "ERROR: $_"
+    Write-LogError $_
     Write-Output (($_.ScriptStackTrace -split '\r?\n') -replace '^(.*)$','ERROR: $1')
     Write-Output (($_.Exception.ToString() -split '\r?\n') -replace '^(.*)$','ERROR EXCEPTION: $1')
     ExitWithCode 1
+}
+
+if ($UpdateRunID) {
+    Write-LogInfo "Using update run id '$UpdateRunID' with loop state path '$updateLoopStatePath'."
+} else {
+    Write-LogWarn "No update run id provided; using shared loop state path '$updateLoopStatePath'."
 }
 
 if ($mock) {
@@ -118,6 +200,53 @@ function LookupOperationResultCode($code) {
     return "Unknown Code $code"
 }
 
+$wuaHResultMessages = @{
+    ([uint32]0x00240005) = 'The system must be restarted to complete installation of the update (WU_S_REBOOT_REQUIRED)';
+    ([uint32]0x80240009) = 'Another conflicting operation was in progress (WU_E_OPERATIONINPROGRESS)';
+    ([uint32]0x80240016) = 'Install not allowed, likely due to pending restart or conflicting install (WU_E_INSTALL_NOT_ALLOWED)';
+    ([uint32]0x80240017) = 'Operation was not performed because there are no applicable updates (WU_E_NOT_APPLICABLE)';
+    ([uint32]0x80240019) = 'An exclusive update cannot be installed with other updates at the same time (WU_E_EXCLUSIVE_INSTALL_CONFLICT)';
+    ([uint32]0x8024001F) = 'Operation did not complete because the network connection was unavailable (WU_E_NO_CONNECTION)';
+    ([uint32]0x80240021) = 'Operation timed out (WU_E_TIME_OUT)';
+    ([uint32]0x80240022) = 'Operation failed for all the updates (WU_E_ALL_UPDATES_FAILED)';
+    ([uint32]0x80240032) = 'The search criteria string was invalid (WU_E_INVALID_CRITERIA)';
+    ([uint32]0x8024200D) = 'The update needs to be downloaded again (WU_E_UH_NEEDANOTHERDOWNLOAD)';
+    ([uint32]0x80242014) = 'The post-reboot operation for the update is still in progress (WU_E_UH_POSTREBOOTSTILLPENDING)';
+    ([uint32]0x80242017) = 'The servicing stack must be updated before this update can be installed (WU_E_UH_NEW_SERVICING_STACK_REQUIRED)';
+    ([uint32]0x8024201D) = 'The update handler is disabled until the system reboots (WU_E_UH_HANDLER_DISABLEDUNTILREBOOT)';
+    ([uint32]0x80244022) = 'The update service is temporarily overloaded (WU_E_PT_HTTP_STATUS_SERVICE_UNAVAIL)';
+    ([uint32]0x8024A007) = 'A reboot is in progress (WU_E_REBOOT_IN_PROGRESS)';
+    ([uint32]0x8024D00C) = 'Windows Update Agent requires a reboot to fix setup state (WU_E_SETUP_REBOOT_TO_FIX)';
+    ([uint32]0x8024D00E) = 'Windows Update Agent setup requires reboot to complete installation (WU_E_SETUP_REBOOTREQUIRED)'
+}
+
+$rebootRequiredHResults = @(
+    [uint32]0x00240005,
+    [uint32]0x80240016,
+    [uint32]0x80242014,
+    [uint32]0x8024201D,
+    [uint32]0x8024A007,
+    [uint32]0x8024D00C,
+    [uint32]0x8024D00E
+)
+
+$servicingStackRequiredHResults = @(
+    [uint32]0x80242017
+)
+
+function LookupWuaHResultMessage($hresult) {
+    $unsignedHResult = [uint32]$hresult
+    if ($wuaHResultMessages.ContainsKey($unsignedHResult)) {
+        return $wuaHResultMessages[$unsignedHResult]
+    }
+    return ('Unknown WUA HRESULT 0x{0:X8}' -f $unsignedHResult)
+}
+
+function Test-HResultInSet($hresult, $set) {
+    $unsignedHResult = [uint32]$hresult
+    return $set -contains $unsignedHResult
+}
+
 function ExitWhenRebootRequired($rebootRequired = $false) {
     # check for pending Windows Updates.
     if (!$rebootRequired) {
@@ -171,8 +300,8 @@ if ($OnlyCheckForRebootRequired) {
 
 $updateFilters = $Filters | ForEach-Object {
     $action, $expression = $_ -split ':',2
-    New-Object PSObject -Property @{
-        Action = $action
+    [PSCustomObject]@{
+        Action     = $action
         Expression = [ScriptBlock]::Create($expression)
     }
 }
@@ -186,13 +315,23 @@ function Test-IncludeUpdate($filters, $update) {
     return $false
 }
 
+function Add-UpdatesToCollection($fromCollection, $toCollection) {
+    for ($i = 0; $i -lt $fromCollection.Count; ++$i) {
+        [void]$toCollection.Add($fromCollection.Item($i))
+    }
+}
+
 $windowsOsVersion = [System.Environment]::OSVersion.Version
 
-Write-Output 'Searching for Windows updates...'
+Write-LogInfo 'Searching for Windows updates...'
 $updatesToDownloadSize = 0
 $updatesToDownload = New-Object -ComObject 'Microsoft.Update.UpdateColl'
-$updatesToInstall = New-Object -ComObject 'Microsoft.Update.UpdateColl'
-while ($true) {
+$updatesToInstallServicingStack = New-Object -ComObject 'Microsoft.Update.UpdateColl'
+$updatesToInstallExclusive = New-Object -ComObject 'Microsoft.Update.UpdateColl'
+$updatesToInstallRegular = New-Object -ComObject 'Microsoft.Update.UpdateColl'
+$queuedUpdateTitles = @{}
+$searchResult = $null
+for ($searchAttempt = 1; $searchAttempt -le $searchMaxRetries; ++$searchAttempt) {
     try {
         $updateSession = New-Object -ComObject 'Microsoft.Update.Session'
         $updateSession.ClientApplicationID = 'packer-windows-update'
@@ -205,8 +344,17 @@ while ($true) {
     } catch {
         $searchStatus = $_.ToString()
     }
-    Write-Output "Search for Windows updates failed with '$searchStatus'. Retrying..."
-    Start-Sleep -Seconds 5
+    if ($searchAttempt -eq $searchMaxRetries) {
+        throw "Search for Windows updates failed after $searchAttempt attempts: $searchStatus"
+    }
+
+    $delaySeconds = Get-RetryDelaySeconds $searchAttempt
+    Write-LogWarn "Search for Windows updates failed with '$searchStatus' (attempt $searchAttempt/$searchMaxRetries). Retrying in $delaySeconds seconds..."
+    Start-Sleep -Seconds $delaySeconds
+}
+
+if ($null -eq $searchResult) {
+    throw 'Search did not produce a valid result.'
 }
 $rebootRequired = $false
 for ($i = 0; $i -lt $searchResult.Updates.Count; ++$i) {
@@ -246,23 +394,76 @@ for ($i = 0; $i -lt $searchResult.Updates.Count; ++$i) {
         Write-Output "Warning The update '$updateTitle' has the CanRequestUserInput flag set (if the install hangs, you might need to exclude it with the filter 'exclude:`$_.InstallationBehavior.CanRequestUserInput' or 'exclude:`$_.Title -like '*$updateTitle*'')"
     }
 
-    if (($updatesToInstall | Select-Object -ExpandProperty Title) -contains $updateTitle) {
+    if ($queuedUpdateTitles.ContainsKey($updateTitle)) {
         Write-Output "Warning, Skipping queueing the duplicated titled update '$updateTitle'."
         continue
     }
 
     Write-Output "Found $updateSummary"
 
-    $update.AcceptEula() | Out-Null
+    [void]$update.AcceptEula()
 
     $updatesToDownloadSize += $updateMaxDownloadSize
-    $updatesToDownload.Add($update) | Out-Null
+    [void]$updatesToDownload.Add($update)
 
-    $updatesToInstall.Add($update) | Out-Null
-    if ($updatesToInstall.Count -ge $UpdateLimit) {
+    $isServicingStackUpdate = $updateTitle -match '(?i)\bservicing stack update\b|\bssu\b'
+    $isExclusiveUpdate = $update.InstallationBehavior.Impact -eq 2
+
+    if ($isServicingStackUpdate) {
+        Write-Output "Queued (servicing stack first) $updateSummary"
+        [void]$updatesToInstallServicingStack.Add($update)
+    } elseif ($isExclusiveUpdate) {
+        Write-Output "Queued (exclusive) $updateSummary"
+        [void]$updatesToInstallExclusive.Add($update)
+    } else {
+        Write-Output "Queued (regular) $updateSummary"
+        [void]$updatesToInstallRegular.Add($update)
+    }
+    $queuedUpdateTitles[$updateTitle] = $true
+
+    $updatesToInstallCount = $updatesToInstallServicingStack.Count + $updatesToInstallExclusive.Count + $updatesToInstallRegular.Count
+    if ($updatesToInstallCount -ge $UpdateLimit) {
         $rebootRequired = $true
         break
     }
+}
+
+$updatesToInstall = New-Object -ComObject 'Microsoft.Update.UpdateColl'
+Add-UpdatesToCollection $updatesToInstallServicingStack $updatesToInstall
+Add-UpdatesToCollection $updatesToInstallExclusive $updatesToInstall
+Add-UpdatesToCollection $updatesToInstallRegular $updatesToInstall
+if ($updatesToInstall.Count) {
+    Write-Output "Install order: $($updatesToInstallServicingStack.Count) servicing stack updates, $($updatesToInstallExclusive.Count) exclusive updates, $($updatesToInstallRegular.Count) regular updates"
+
+    $queuedUpdateIdentities = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $updatesToInstall.Count; ++$i) {
+        [void]$queuedUpdateIdentities.Add((Get-UpdateIdentity $updatesToInstall.Item($i)))
+    }
+    $queuedUpdateIdentities = @($queuedUpdateIdentities | Sort-Object -Unique)
+    $queuedFingerprint = $queuedUpdateIdentities -join '|'
+
+    $loopState = Get-UpdateLoopState
+    $consecutiveLoopCount = 1
+    if ($null -ne $loopState -and $loopState.Fingerprint -eq $queuedFingerprint) {
+        $consecutiveLoopCount = [int]$loopState.ConsecutiveCount + 1
+    }
+
+    $newLoopState = [PSCustomObject]@{
+        Fingerprint      = $queuedFingerprint
+        ConsecutiveCount = $consecutiveLoopCount
+        UpdateIdentities = $queuedUpdateIdentities
+        LastUpdatedUtc   = [DateTime]::UtcNow.ToString('o')
+    }
+    Set-UpdateLoopState $newLoopState
+
+    if ($consecutiveLoopCount -ge $updateLoopMaxConsecutiveRounds) {
+        Write-LogError ("An update loop was detected after {0} consecutive rounds with the same updates: {1}" -f $consecutiveLoopCount, ($queuedUpdateIdentities -join ', '))
+        ExitWithCode $exitCodeUpdateLoopDetected
+    }
+}
+
+if ($updatesToInstall.Count -gt 1 -and $updatesToInstallExclusive.Count -gt 0) {
+    Write-Output 'Warning: exclusive updates were detected and prioritized, but installation conflicts can still require additional reboot cycles.'
 }
 
 if ($updatesToDownload.Count) {
@@ -277,8 +478,19 @@ if ($updatesToDownload.Count) {
         $updateDownloader.Priority = 3 # 1 (dpLow), 2 (dpNormal), 3 (dpHigh).
     }
     $updateDownloader.Updates = $updatesToDownload
-    while ($true) {
-        $downloadResult = $updateDownloader.Download()
+    for ($downloadAttempt = 1; $downloadAttempt -le $downloadMaxRetries; ++$downloadAttempt) {
+        try {
+            $downloadResult = $updateDownloader.Download()
+        } catch {
+            if ($downloadAttempt -eq $downloadMaxRetries) {
+                throw "Download Windows updates failed after $downloadAttempt attempts: $_"
+            }
+
+            $delaySeconds = Get-RetryDelaySeconds $downloadAttempt
+            Write-LogWarn "Download Windows updates threw an exception (attempt $downloadAttempt/$downloadMaxRetries). Retrying in $delaySeconds seconds..."
+            Start-Sleep -Seconds $delaySeconds
+            continue
+        }
         if ($downloadResult.ResultCode -eq 2) {
             break
         }
@@ -287,9 +499,16 @@ if ($updatesToDownload.Count) {
             $rebootRequired = $true
             break
         }
+
+        if ($downloadAttempt -eq $downloadMaxRetries) {
+            $downloadStatus = LookupOperationResultCode($downloadResult.ResultCode)
+            throw "Download Windows updates failed after $downloadAttempt attempts with status $downloadStatus."
+        }
+
         $downloadStatus = LookupOperationResultCode($downloadResult.ResultCode)
-        Write-Output "Download Windows updates failed with $downloadStatus. Retrying..."
-        Start-Sleep -Seconds 5
+        $delaySeconds = Get-RetryDelaySeconds $downloadAttempt
+        Write-LogWarn "Download Windows updates failed with $downloadStatus (attempt $downloadAttempt/$downloadMaxRetries). Retrying in $delaySeconds seconds..."
+        Start-Sleep -Seconds $delaySeconds
     }
 }
 
@@ -299,12 +518,59 @@ if ($updatesToInstall.Count) {
     $updateInstaller.Updates = $updatesToInstall
 
     $installRebootRequired = $false
+    $servicingStackRequiredDetected = $false
+    $isTerminalInstallError = $false
+    $terminalInstallErrors = New-Object System.Collections.Generic.List[string]
     try {
         $installResult = $updateInstaller.Install()
         $installRebootRequired = $installResult.RebootRequired
+
+        for ($i = 0; $i -lt $updatesToInstall.Count; ++$i) {
+            $installedUpdate = $updatesToInstall.Item($i)
+            $updateResult = $installResult.GetUpdateResult($i)
+            $updateResultCode = LookupOperationResultCode($updateResult.ResultCode)
+            $updateHResult = [uint32]$updateResult.HResult
+            $updateResultMessage = LookupWuaHResultMessage $updateHResult
+            $updateRebootRequired = $updateResult.RebootRequired
+
+            Write-Output ((
+                "Install result: '{0}' => ResultCode={1} ({2}), HResult=0x{3:X8}, RebootRequired={4}, Message='{5}'"
+            ) -f $installedUpdate.Title, $updateResult.ResultCode, $updateResultCode, $updateHResult, $updateRebootRequired, $updateResultMessage)
+
+            if ($updateResult.ResultCode -eq 2) {
+                continue
+            }
+
+            if ($updateRebootRequired -or (Test-HResultInSet $updateHResult $rebootRequiredHResults)) {
+                $rebootRequired = $true
+            }
+
+            if (Test-HResultInSet $updateHResult $servicingStackRequiredHResults) {
+                $servicingStackRequiredDetected = $true
+                $rebootRequired = $true
+                continue
+            }
+
+            $terminalInstallErrors.Add((
+                "'{0}' failed with ResultCode={1} ({2}), HResult=0x{3:X8} ({4})"
+            ) -f $installedUpdate.Title, $updateResult.ResultCode, $updateResultCode, $updateHResult, $updateResultMessage)
+        }
+
+        if ($servicingStackRequiredDetected) {
+            Write-Output 'Servicing stack prerequisite was detected. A reboot will be performed before retrying updates.'
+        }
+
+        if ($terminalInstallErrors.Count -gt 0) {
+            $isTerminalInstallError = $true
+            throw ('Windows update installation encountered non-reboot terminal errors: ' + ($terminalInstallErrors -join '; '))
+        }
     } catch {
         Write-Warning "Windows update installation failed with error:"
         Write-Warning $_.Exception.ToString()
+
+        if ($isTerminalInstallError) {
+            throw
+        }
 
         # Windows update install failed for some reason
         # restart the machine and try again

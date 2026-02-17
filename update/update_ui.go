@@ -7,11 +7,16 @@ import (
 	"github.com/hashicorp/packer-plugin-sdk/packer"
 )
 
+// UpdateUi wraps a packer.Ui to intercept completion signals from the Windows update
+// PowerShell script. When the script outputs a line beginning with "Exiting with code ",
+// the finished field is set to true, allowing the provisioner to detect that the script
+// exited normally rather than being interrupted.
 type UpdateUi struct {
 	ui       packer.Ui
 	finished bool
 }
 
+// NewUpdateUi returns an UpdateUi wrapping the provided Packer UI.
 func NewUpdateUi(ui packer.Ui) *UpdateUi {
 	return &UpdateUi{
 		ui:       ui,
@@ -31,6 +36,9 @@ func (u *UpdateUi) Sayf(s string, args ...any) {
 	u.ui.Sayf(s, args...)
 }
 
+// Say intercepts lines from the Windows update script. A line beginning with
+// "Exiting with code " marks the script as finished and is suppressed from the
+// underlying UI; all other lines are forwarded normally.
 func (u *UpdateUi) Say(s string) {
 	if strings.HasPrefix(s, "Exiting with code ") {
 		u.finished = true

@@ -1,13 +1,17 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$name = "{{.TaskName}}"
+$f = $null
+$logStream = $null
 trap {
     Write-Output "ERROR: $_"
     Write-Output (($_.ScriptStackTrace -split '\r?\n') -replace '^(.*)$','ERROR: $1')
     Write-Output (($_.Exception.ToString() -split '\r?\n') -replace '^(.*)$','ERROR EXCEPTION: $1')
+    if ($null -ne $logStream) { try { $logStream.Dispose() } catch {} }
+    if ($null -ne $f) { try { $f.DeleteTask("\$name", 0) } catch {} }
     Exit 1
 }
-$name = "{{.TaskName}}"
 $log = "$env:SystemRoot\Temp\$name.out"
 $s = New-Object -ComObject "Schedule.Service"
 $s.Connect()
@@ -79,13 +83,18 @@ if (!(Get-Command Get-CimInstance -ErrorAction:SilentlyContinue)) {
 }
 $reportProgressInterval = New-TimeSpan -Minutes 1
 $startDate = Get-Date
-$line = 0
 do {
     Start-Sleep -Seconds 5
     if (Test-Path $log) {
-        Get-Content $log | Select-Object -skip $line | ForEach-Object {
-            ++$line
-            Write-Output $_
+        if ($null -eq $logStream) {
+            # Open with ReadWrite share so the writing process is not blocked.
+            $logStream = [System.IO.StreamReader]::new(
+                [System.IO.File]::Open($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite),
+                [System.Text.Encoding]::Default,
+                $true)
+        }
+        while (-not $logStream.EndOfStream) {
+            Write-Output $logStream.ReadLine()
         }
     }
     $currentDate = Get-Date
@@ -97,6 +106,10 @@ do {
         Write-Output ("Waiting for operation to complete (system performance: {0:P0} cpu; {1:P0} memory)..." -f $cpuUsage,$memoryUsage)
     }
 } while (!($t.state -eq 3))
+if ($null -ne $logStream) {
+    $logStream.Dispose()
+    $logStream = $null
+}
 $result = $t.LastTaskResult
 if (Test-Path $log) {
     Remove-Item $log -Force -ErrorAction SilentlyContinue | Out-Null

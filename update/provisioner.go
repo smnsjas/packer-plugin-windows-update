@@ -1,7 +1,10 @@
 //go:generate packer-sdc mapstructure-to-hcl2 -type Config
 
-// NB this code was based on https://github.com/hashicorp/packer/blob/81522dced0b25084a824e79efda02483b12dc7cd/provisioner/windows-restart/provisioner.go
-
+// Package update provides a Packer provisioner that installs Windows Updates on the guest machine.
+// It drives the Windows Update Agent (WUA) via an embedded PowerShell script, handling
+// automatic reboots and retries until no further updates are available.
+//
+// Based on https://github.com/hashicorp/packer/blob/81522dced0b25084a824e79efda02483b12dc7cd/provisioner/windows-restart/provisioner.go
 package update
 
 import (
@@ -9,8 +12,8 @@ import (
 	"context"
 	_ "embed" // this is needed for using the go:embed directive
 	"encoding/base64"
-	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -25,21 +28,25 @@ import (
 )
 
 const (
-	elevatedPath                 = "C:/Windows/Temp/packer-windows-update-elevated.ps1"
-	elevatedCommand              = "PowerShell -ExecutionPolicy Bypass -OutputFormat Text -File C:/Windows/Temp/packer-windows-update-elevated.ps1"
-	windowsUpdatePath            = "C:/Windows/Temp/packer-windows-update.ps1"
-	pendingRebootElevatedPath    = "C:/Windows/Temp/packer-windows-update-pending-reboot-elevated.ps1"
-	pendingRebootElevatedCommand = "PowerShell -ExecutionPolicy Bypass -OutputFormat Text -File C:/Windows/Temp/packer-windows-update-pending-reboot-elevated.ps1"
-	restartCommand               = "shutdown.exe -f -r -t 0 -c \"packer restart\""
-	testRestartCommand           = "shutdown.exe -f -r -t 60 -c \"packer restart test\""
-	abortTestRestartCommand      = "shutdown.exe -a"
-	retryableDelay               = 5 * time.Second
-	uploadTimeout                = 5 * time.Minute
+	elevatedPath                       = "C:/Windows/Temp/packer-windows-update-elevated.ps1"
+	elevatedCommand                    = "PowerShell -ExecutionPolicy Bypass -OutputFormat Text -File C:/Windows/Temp/packer-windows-update-elevated.ps1"
+	windowsUpdatePath                  = "C:/Windows/Temp/packer-windows-update.ps1"
+	pendingRebootElevatedPath          = "C:/Windows/Temp/packer-windows-update-pending-reboot-elevated.ps1"
+	pendingRebootElevatedCommand       = "PowerShell -ExecutionPolicy Bypass -OutputFormat Text -File C:/Windows/Temp/packer-windows-update-pending-reboot-elevated.ps1"
+	restartCommand                     = "shutdown.exe -f -r -t 0 -c \"packer restart\""
+	testRestartCommand                 = "shutdown.exe -f -r -t 60 -c \"packer restart test\""
+	abortTestRestartCommand            = "shutdown.exe -a"
+	windowsUpdateExitCodeReboot        = 101
+	windowsUpdateExitCodeWin2012Reboot = 2147942501 // ERROR_PROCESS_ABORTED, returned by Windows Server 2012
+	windowsUpdateExitCodeLoop          = 102
+	retryableDelay                     = 5 * time.Second
+	uploadTimeout                      = 5 * time.Minute
 )
 
 //go:embed windows-update.ps1
 var windowsUpdatePs1 []byte
 
+// Config holds the provisioner configuration decoded from the HCL2 template.
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
 
@@ -70,8 +77,12 @@ type Config struct {
 	ctx interpolate.Context
 }
 
+// Provisioner is a Packer provisioner that installs Windows updates on the guest machine.
+// It uploads an embedded PowerShell script and drives the Windows Update Agent (WUA),
+// handling reboots and retries automatically.
 type Provisioner struct {
-	config Config
+	config      Config
+	updateRunID string
 }
 
 func (b *Provisioner) ConfigSpec() hcldec.ObjectSpec {
@@ -102,11 +113,6 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 
 	var errs error
 
-	if p.config.Username == "" {
-		errs = packer.MultiErrorAppend(errs,
-			errors.New("Must supply an 'username'"))
-	}
-
 	if p.config.UpdateLimit == 0 {
 		p.config.UpdateLimit = 1000
 	}
@@ -119,6 +125,9 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 }
 
 func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.Communicator, _ map[string]interface{}) error {
+	p.updateRunID = uuid.TimeOrderedUUID()
+	log.Printf("[DEBUG] windows-update: starting provision, runID=%s", p.updateRunID)
+
 	ui.Say("Uploading the Windows update elevated script...")
 	var buffer bytes.Buffer
 	err := elevatedTemplate.Execute(&buffer, elevatedOptions{
@@ -129,8 +138,7 @@ func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.C
 		Command:         p.windowsUpdateCommand(),
 	})
 	if err != nil {
-		fmt.Printf("Error creating elevated template: %s", err)
-		return err
+		return fmt.Errorf("creating windows update elevated template: %w", err)
 	}
 	err = retry.Config{StartTimeout: uploadTimeout}.Run(ctx, func(context.Context) error {
 		if err := comm.Upload(
@@ -155,8 +163,7 @@ func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.C
 		Command:         p.windowsUpdateCheckForRebootRequiredCommand(),
 	})
 	if err != nil {
-		fmt.Printf("Error creating elevated template: %s", err)
-		return err
+		return fmt.Errorf("creating pending-reboot elevated template: %w", err)
 	}
 	err = retry.Config{StartTimeout: uploadTimeout}.Run(ctx, func(context.Context) error {
 		if err := comm.Upload(
@@ -200,34 +207,53 @@ func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.C
 func (p *Provisioner) update(ctx context.Context, ui packer.Ui, comm packer.Communicator) (bool, error) {
 	ui.Say("Running Windows update...")
 	var restartPending bool
-	err := retry.Config{
-		RetryDelay: func() time.Duration { return retryableDelay },
-		Tries:      p.config.UpdateMaxRetries,
-	}.Run(ctx, func(ctx context.Context) error {
+	for try := 1; try <= p.config.UpdateMaxRetries; try++ {
+		log.Printf("[DEBUG] windows-update: update attempt %d/%d", try, p.config.UpdateMaxRetries)
 		ui := NewUpdateUi(ui)
 		cmd := &packer.RemoteCmd{Command: elevatedCommand}
 		err := cmd.RunWithUi(ctx, comm, ui)
 		if err != nil {
-			return err
+			if try == p.config.UpdateMaxRetries {
+				return restartPending, err
+			}
+
+			if err := waitRetryDelay(ctx, retryableDelay); err != nil {
+				return restartPending, err
+			}
+			continue
 		}
 		var exitStatus = cmd.ExitStatus()
 		if !ui.finished {
-			return fmt.Errorf("Windows update script did not finish")
+			err = fmt.Errorf("Windows update script did not finish")
+			if try == p.config.UpdateMaxRetries {
+				return restartPending, err
+			}
+
+			if err := waitRetryDelay(ctx, retryableDelay); err != nil {
+				return restartPending, err
+			}
+			continue
 		}
-		switch exitStatus {
-		case 0:
-			return nil
-		case 101:
-			restartPending = true
-			return nil
-		case 2147942501: //windows 2012
-			restartPending = true
-			return nil
-		default:
-			return fmt.Errorf("Windows update script exited with non-zero exit status: %d", exitStatus)
+
+		updateErr := updateExitStatusError(exitStatus, &restartPending)
+		if updateErr == nil {
+			return restartPending, nil
 		}
-	})
-	return restartPending, err
+
+		if exitStatus == windowsUpdateExitCodeLoop {
+			return restartPending, updateErr
+		}
+
+		if try == p.config.UpdateMaxRetries {
+			return restartPending, updateErr
+		}
+
+		if err := waitRetryDelay(ctx, retryableDelay); err != nil {
+			return restartPending, err
+		}
+	}
+
+	return restartPending, fmt.Errorf("Windows update failed after %d retries", p.config.UpdateMaxRetries)
 }
 
 func (p *Provisioner) restart(ctx context.Context, ui packer.Ui, comm packer.Communicator) error {
@@ -287,9 +313,9 @@ func (p *Provisioner) restart(ctx context.Context, ui packer.Ui, comm packer.Com
 			switch exitStatus {
 			case 0:
 				restartPending = false
-			case 101:
+			case windowsUpdateExitCodeReboot:
 				restartPending = true
-			case 2147942501: //windows 2012
+			case windowsUpdateExitCodeWin2012Reboot:
 				restartPending = true
 			default:
 				return fmt.Errorf("Machine not yet available (exit status %d)", exitStatus)
@@ -321,16 +347,51 @@ func (p *Provisioner) retryable(ctx context.Context, f func(ctx context.Context)
 	}.Run(ctx, f)
 }
 
+// waitRetryDelay pauses for the given delay, returning ctx.Err() immediately if
+// the context is cancelled before the timer fires.
+func waitRetryDelay(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// updateExitStatusError maps a Windows update PowerShell exit status to a Go error,
+// setting *restartPending when the exit code indicates a pending reboot.
+// Returns nil on success (exit status 0 or reboot-pending variants).
+func updateExitStatusError(exitStatus int, restartPending *bool) error {
+	switch exitStatus {
+	case 0:
+		return nil
+	case windowsUpdateExitCodeReboot:
+		*restartPending = true
+		return nil
+	case windowsUpdateExitCodeWin2012Reboot:
+		*restartPending = true
+		return nil
+	case windowsUpdateExitCodeLoop:
+		return fmt.Errorf("Windows update script detected a repeated update loop (exit status: %d)", exitStatus)
+	default:
+		return fmt.Errorf("Windows update script exited with non-zero exit status: %d", exitStatus)
+	}
+}
+
 func (p *Provisioner) windowsUpdateCommand() string {
 	return fmt.Sprintf(
 		"PowerShell -ExecutionPolicy Bypass -OutputFormat Text -EncodedCommand %s",
 		base64.StdEncoding.EncodeToString(
 			encodeUtf16Le(fmt.Sprintf(
-				"%s%s%s -UpdateLimit %d",
+				"%s%s%s -UpdateLimit %d -UpdateRunID %s",
 				windowsUpdatePath,
 				searchCriteriaArgument(p.config.SearchCriteria),
 				filtersArgument(p.config.Filters),
-				p.config.UpdateLimit))))
+				p.config.UpdateLimit,
+				escapePowerShellString(p.updateRunID)))))
 }
 
 func (p *Provisioner) windowsUpdateCheckForRebootRequiredCommand() string {
@@ -356,32 +417,18 @@ func searchCriteriaArgument(searchCriteria string) string {
 	if searchCriteria == "" {
 		return ""
 	}
-
-	var buffer bytes.Buffer
-
-	buffer.WriteString(" -SearchCriteria ")
-	buffer.WriteString(escapePowerShellString(searchCriteria))
-
-	return buffer.String()
+	return " -SearchCriteria " + escapePowerShellString(searchCriteria)
 }
 
 func filtersArgument(filters []string) string {
-	if filters == nil {
+	if len(filters) == 0 {
 		return ""
 	}
-
-	var buffer bytes.Buffer
-
-	buffer.WriteString(" -Filters ")
-
+	escaped := make([]string, len(filters))
 	for i, filter := range filters {
-		if i > 0 {
-			buffer.WriteString(",")
-		}
-		buffer.WriteString(escapePowerShellString(filter))
+		escaped[i] = escapePowerShellString(filter)
 	}
-
-	return buffer.String()
+	return " -Filters " + strings.Join(escaped, ",")
 }
 
 func escapePowerShellString(value string) string {

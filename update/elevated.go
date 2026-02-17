@@ -7,6 +7,9 @@ import (
 	"text/template"
 )
 
+// elevatedOptions holds the values injected into elevated-template.ps1 at provision time.
+// The rendered script registers a Windows Scheduled Task under the given user, runs the
+// given Command, and streams its output back to Packer until the task completes.
 type elevatedOptions struct {
 	Username        string
 	Password        string
@@ -18,6 +21,8 @@ type elevatedOptions struct {
 //go:embed elevated-template.ps1
 var elevatedTemplatePs1 string
 
+// elevatedTemplate is the parsed Go text/template for elevated-template.ps1,
+// rendered at provision time with an elevatedOptions value.
 var elevatedTemplate = template.Must(
 	template.New("Elevated").Parse(
 		elevatedTemplatePs1))
