@@ -235,7 +235,7 @@ $servicingStackRequiredHResults = @(
 )
 
 function LookupWuaHResultMessage($hresult) {
-    $unsignedHResult = [uint32]$hresult
+    $unsignedHResult = [uint32]($hresult -band 0xFFFFFFFF)
     if ($wuaHResultMessages.ContainsKey($unsignedHResult)) {
         return $wuaHResultMessages[$unsignedHResult]
     }
@@ -243,7 +243,7 @@ function LookupWuaHResultMessage($hresult) {
 }
 
 function Test-HResultInSet($hresult, $set) {
-    $unsignedHResult = [uint32]$hresult
+    $unsignedHResult = [uint32]($hresult -band 0xFFFFFFFF)
     return $set -contains $unsignedHResult
 }
 
