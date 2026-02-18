@@ -1,4 +1,4 @@
-module github.com/rgl/packer-plugin-windows-update
+module github.com/smnsjas/packer-plugin-windows-update
 
 go 1.25.1
 

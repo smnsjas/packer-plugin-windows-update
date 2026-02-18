@@ -5,10 +5,10 @@ packer {
       version = "1.1.4"
       source  = "github.com/hashicorp/qemu"
     }
-    # see https://github.com/rgl/packer-plugin-windows-update
+    # see https://github.com/smnsjas/packer-plugin-windows-update
     windows-update = {
       version = ">= 0.0.0"
-      source  = "github.com/rgl/windows-update"
+      source  = "github.com/smnsjas/windows-update"
     }
   }
 }

@@ -5,7 +5,7 @@ import (
 
 	"github.com/hashicorp/packer-plugin-sdk/plugin"
 	v "github.com/hashicorp/packer-plugin-sdk/version"
-	"github.com/rgl/packer-plugin-windows-update/update"
+	"github.com/smnsjas/packer-plugin-windows-update/update"
 )
 
 var (
