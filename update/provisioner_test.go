@@ -103,3 +103,142 @@ func TestWaitRetryDelayCancellation(t *testing.T) {
 		t.Fatalf("expected quick return on cancellation, took %s", elapsed)
 	}
 }
+
+func TestPrepareDefaults(t *testing.T) {
+	t.Parallel()
+	p := &Provisioner{}
+	if err := p.Prepare(); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+
+	if p.config.RestartTimeout != 4*time.Hour {
+		t.Errorf("RestartTimeout = %v; want %v", p.config.RestartTimeout, 4*time.Hour)
+	}
+	if p.config.Username != "SYSTEM" {
+		t.Errorf("Username = %q; want %q", p.config.Username, "SYSTEM")
+	}
+	if p.config.SearchCriteria != "BrowseOnly=0 and IsInstalled=0" {
+		t.Errorf("SearchCriteria = %q; want %q", p.config.SearchCriteria, "BrowseOnly=0 and IsInstalled=0")
+	}
+	if p.config.UpdateLimit != 1000 {
+		t.Errorf("UpdateLimit = %d; want 1000", p.config.UpdateLimit)
+	}
+	if p.config.UpdateMaxRetries != 5 {
+		t.Errorf("UpdateMaxRetries = %d; want 5", p.config.UpdateMaxRetries)
+	}
+}
+
+func TestFiltersArgument(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		filters []string
+		want    string
+	}{
+		{
+			name:    "nil filters",
+			filters: nil,
+			want:    "",
+		},
+		{
+			name:    "empty filters",
+			filters: []string{},
+			want:    "",
+		},
+		{
+			name:    "single filter",
+			filters: []string{"include:$true"},
+			want:    " -Filters 'include:$true'",
+		},
+		{
+			name:    "multiple filters",
+			filters: []string{"exclude:$_.Title -like '*Preview*'", "include:$true"},
+			want:    " -Filters 'exclude:$_.Title -like ''*Preview*''','include:$true'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := filtersArgument(tt.filters)
+			if got != tt.want {
+				t.Errorf("filtersArgument(%v) = %q; want %q", tt.filters, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSearchCriteriaArgument(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		criteria string
+		want     string
+	}{
+		{
+			name:     "empty criteria",
+			criteria: "",
+			want:     "",
+		},
+		{
+			name:     "recommended criteria",
+			criteria: "BrowseOnly=0 and IsInstalled=0",
+			want:     " -SearchCriteria 'BrowseOnly=0 and IsInstalled=0'",
+		},
+		{
+			name:     "criteria with single quote",
+			criteria: "Type='Software' and IsInstalled=0",
+			want:     " -SearchCriteria 'Type=''Software'' and IsInstalled=0'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := searchCriteriaArgument(tt.criteria)
+			if got != tt.want {
+				t.Errorf("searchCriteriaArgument(%q) = %q; want %q", tt.criteria, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEscapePowerShellString(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "no quotes",
+			input: "hello",
+			want:  "'hello'",
+		},
+		{
+			name:  "single quote",
+			input: "it's",
+			want:  "'it''s'",
+		},
+		{
+			name:  "multiple single quotes",
+			input: "a'b'c",
+			want:  "'a''b''c'",
+		},
+		{
+			name:  "empty string",
+			input: "",
+			want:  "''",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := escapePowerShellString(tt.input)
+			if got != tt.want {
+				t.Errorf("escapePowerShellString(%q) = %q; want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}

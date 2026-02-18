@@ -12,11 +12,14 @@ All notable changes to this project will be documented in this file.
 - `t.Parallel()` on all tests and subtests in `update/provisioner_test.go`.
 - Curated WUA HRESULT mapping for install result diagnostics in `update/windows-update.ps1`.
 - Per-update install result logging including `ResultCode`, `HResult`, and reboot requirement.
+- Per-update download result logging: individual download failures now emit a `WARN` line with `ResultCode` and `HResult` so partial download failures are visible without waiting for install to fail.
 - Install queue ordering that prioritizes servicing stack updates and exclusive updates before regular updates.
 - Search and download bounded retry loops with backoff in `update/windows-update.ps1`.
 - Update-loop detection with dedicated script exit status `102`.
 - Per-run loop-state file isolation via `-UpdateRunID` passed from `update/provisioner.go` to `update/windows-update.ps1`.
 - Targeted unit tests in `update/provisioner_test.go` for exit status handling, command construction, and cancellation-aware retry delay behavior.
+- Warning log in `update/elevated-template.ps1` when the scheduled task does not reach running state within the 10-second start timeout.
+- Table-driven unit tests for `Prepare()` defaults, `filtersArgument`, `searchCriteriaArgument`, and `escapePowerShellString` in `update/provisioner_test.go`.
 
 ### Changed
 
@@ -33,12 +36,20 @@ All notable changes to this project will be documented in this file.
 - Added structured startup logging for run ID and loop-state path.
 - Updated Go update flow to fail fast on exit `102` and use context-aware retry delays.
 - Standardized reboot exit-status constant usage in Go update/restart status handling.
+- Loop-state file paths in `update/windows-update.ps1` now use `$env:SystemRoot\Temp\` instead of the hardcoded `C:\Windows\Temp\`, ensuring correct behaviour when Windows is installed on a non-C drive.
+- `search_criteria` default (`BrowseOnly=0 and IsInstalled=0`) is now set in `Prepare()` rather than only in the PowerShell script parameter default, making it visible to `packer inspect` and eliminating the split-brain between Go and PowerShell defaults.
 
 ### Fixed
 
 - Orphaned scheduled task in `update/elevated-template.ps1` when an error occurred after task registration but before `DeleteTask`; trap block now calls `DeleteTask` and disposes the log `StreamReader` on failure.
 - Corrected HRESULT hashtable key typing to ensure lookup works with unsigned HRESULT values.
 - Added loop-state cleanup on terminal script exits while preserving state across reboot-required exits.
+- **Critical**: `update/elevated-template.ps1` now drains remaining log output after the task-completion do-while loop exits. Previously, output written during the final poll interval (including the `"Exiting with code N"` sentinel line) was never forwarded to Packer. This caused `UpdateUi.finished` to remain `false`, making the Go layer treat every successful update round as an interrupted run and either retry unnecessarily or fail the build.
+- Removed dead `var errs error` in `Prepare()` that was never assigned and always returned nil, eliminating a misleading multi-error placeholder.
+- Fixed outer-variable capture in the pending-reboot `retryable` closure in `restart()`: bare `err = cmd.RunWithUi(...)` mutated the enclosing function's `err` on each retry; replaced with a scoped `if err := ...; err != nil` check and an explicit `return nil`.
+- Completed lowercasing of error strings in `update()`, `restart()`, and `updateExitStatusError()` to satisfy Go error string conventions.
+- Replaced `%s` with `%w` in upload-retry error format strings so callers can inspect the underlying communicator error via `errors.Is`/`errors.As`.
+- `windows-update.ps1` upload now wrapped in `retry.Config{StartTimeout: uploadTimeout}`, consistent with the two elevated script uploads; a single flaky WinRM write no longer fails the build outright.
 
 ### Documentation
 

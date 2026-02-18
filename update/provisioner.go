@@ -111,7 +111,9 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		p.config.Username = "SYSTEM"
 	}
 
-	var errs error
+	if p.config.SearchCriteria == "" {
+		p.config.SearchCriteria = "BrowseOnly=0 and IsInstalled=0"
+	}
 
 	if p.config.UpdateLimit == 0 {
 		p.config.UpdateLimit = 1000
@@ -121,7 +123,7 @@ func (p *Provisioner) Prepare(raws ...interface{}) error {
 		p.config.UpdateMaxRetries = 5
 	}
 
-	return errs
+	return nil
 }
 
 func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.Communicator, _ map[string]interface{}) error {
@@ -145,7 +147,7 @@ func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.C
 			elevatedPath,
 			bytes.NewReader(buffer.Bytes()),
 			nil); err != nil {
-			return fmt.Errorf("Error uploading the Windows update elevated script: %s", err)
+			return fmt.Errorf("uploading the windows update elevated script: %w", err)
 		}
 		return nil
 	})
@@ -170,7 +172,7 @@ func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.C
 			pendingRebootElevatedPath,
 			bytes.NewReader(buffer.Bytes()),
 			nil); err != nil {
-			return fmt.Errorf("Error uploading the Windows update check for reboot required elevated script: %s", err)
+			return fmt.Errorf("uploading the windows update pending-reboot elevated script: %w", err)
 		}
 		return nil
 	})
@@ -179,10 +181,15 @@ func (p *Provisioner) Provision(ctx context.Context, ui packer.Ui, comm packer.C
 	}
 
 	ui.Say("Uploading the Windows update script...")
-	err = comm.Upload(
-		windowsUpdatePath,
-		bytes.NewReader(windowsUpdatePs1),
-		nil)
+	err = retry.Config{StartTimeout: uploadTimeout}.Run(ctx, func(context.Context) error {
+		if err := comm.Upload(
+			windowsUpdatePath,
+			bytes.NewReader(windowsUpdatePs1),
+			nil); err != nil {
+			return fmt.Errorf("uploading the windows update script: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
@@ -224,7 +231,7 @@ func (p *Provisioner) update(ctx context.Context, ui packer.Ui, comm packer.Comm
 		}
 		var exitStatus = cmd.ExitStatus()
 		if !ui.finished {
-			err = fmt.Errorf("Windows update script did not finish")
+			err = fmt.Errorf("windows update script did not finish")
 			if try == p.config.UpdateMaxRetries {
 				return restartPending, err
 			}
@@ -253,7 +260,7 @@ func (p *Provisioner) update(ctx context.Context, ui packer.Ui, comm packer.Comm
 		}
 	}
 
-	return restartPending, fmt.Errorf("Windows update failed after %d retries", p.config.UpdateMaxRetries)
+	return restartPending, fmt.Errorf("windows update failed after %d retries", p.config.UpdateMaxRetries)
 }
 
 func (p *Provisioner) restart(ctx context.Context, ui packer.Ui, comm packer.Communicator) error {
@@ -268,9 +275,9 @@ func (p *Provisioner) restart(ctx context.Context, ui packer.Ui, comm packer.Com
 			}
 			exitStatus := cmd.ExitStatus()
 			if exitStatus != 0 {
-				return fmt.Errorf("Failed to restart the machine with exit status: %d", exitStatus)
+				return fmt.Errorf("failed to restart the machine with exit status: %d", exitStatus)
 			}
-			return err
+			return nil
 		})
 		if err != nil {
 			return err
@@ -286,7 +293,7 @@ func (p *Provisioner) restart(ctx context.Context, ui packer.Ui, comm packer.Com
 			}
 			exitStatus := cmd.ExitStatus()
 			if exitStatus != 0 {
-				return fmt.Errorf("Machine not yet available (exit status %d)", exitStatus)
+				return fmt.Errorf("machine not yet available (exit status %d)", exitStatus)
 			}
 			cmd = &packer.RemoteCmd{Command: abortTestRestartCommand}
 			err = cmd.RunWithUi(ctx, comm, ui)
@@ -301,12 +308,11 @@ func (p *Provisioner) restart(ctx context.Context, ui packer.Ui, comm packer.Com
 		err = p.retryable(ctx, func(ctx context.Context) error {
 			ui := NewUpdateUi(ui)
 			cmd := &packer.RemoteCmd{Command: pendingRebootElevatedCommand}
-			err = cmd.RunWithUi(ctx, comm, ui)
-			if err != nil {
+			if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
 				return err
 			}
 			if !ui.finished {
-				return fmt.Errorf("Windows update script did not finish")
+				return fmt.Errorf("windows update script did not finish")
 			}
 
 			exitStatus := cmd.ExitStatus()
@@ -318,10 +324,10 @@ func (p *Provisioner) restart(ctx context.Context, ui packer.Ui, comm packer.Com
 			case windowsUpdateExitCodeWin2012Reboot:
 				restartPending = true
 			default:
-				return fmt.Errorf("Machine not yet available (exit status %d)", exitStatus)
+				return fmt.Errorf("machine not yet available (exit status %d)", exitStatus)
 			}
 
-			return err
+			return nil
 		})
 		if err != nil {
 			return err
@@ -375,9 +381,9 @@ func updateExitStatusError(exitStatus int, restartPending *bool) error {
 		*restartPending = true
 		return nil
 	case windowsUpdateExitCodeLoop:
-		return fmt.Errorf("Windows update script detected a repeated update loop (exit status: %d)", exitStatus)
+		return fmt.Errorf("windows update script detected a repeated update loop (exit status: %d)", exitStatus)
 	default:
-		return fmt.Errorf("Windows update script exited with non-zero exit status: %d", exitStatus)
+		return fmt.Errorf("windows update script exited with non-zero exit status: %d", exitStatus)
 	}
 }
 

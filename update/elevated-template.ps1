@@ -68,6 +68,9 @@ while ((!($t.state -eq 4)) -and ($sec -lt $timeout)) {
     Start-Sleep -Seconds 1
     $sec++
 }
+if ($t.state -ne 4) {
+    Write-Output "Warning: scheduled task '$name' did not reach running state within $timeout seconds (current state: $($t.state)). Waiting for completion anyway."
+}
 # Windows PowerShell 2 on Windows 7 does not have Get-CimInstance.
 # PowerShell 6 does not have Get-WmiObject.
 if (!(Get-Command Get-CimInstance -ErrorAction:SilentlyContinue)) {
@@ -106,9 +109,16 @@ do {
         Write-Output ("Waiting for operation to complete (system performance: {0:P0} cpu; {1:P0} memory)..." -f $cpuUsage,$memoryUsage)
     }
 } while (!($t.state -eq 3))
+# Final drain: read any output written after the last poll cycle.
 if ($null -ne $logStream) {
+    while (-not $logStream.EndOfStream) {
+        Write-Output $logStream.ReadLine()
+    }
     $logStream.Dispose()
     $logStream = $null
+} elseif (Test-Path $log) {
+    # Task completed before the log was opened (very fast execution).
+    Get-Content $log
 }
 $result = $t.LastTaskResult
 if (Test-Path $log) {

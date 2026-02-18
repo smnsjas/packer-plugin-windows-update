@@ -37,13 +37,13 @@ $searchMaxRetries = 30
 $downloadMaxRetries = 30
 $retryBaseDelaySeconds = 5
 $retryMaxDelaySeconds = 60
-$updateLoopStatePath = 'C:\Windows\Temp\packer-windows-update-loop-state.json'
+$updateLoopStatePath = "$env:SystemRoot\Temp\packer-windows-update-loop-state.json"
 $updateLoopMaxConsecutiveRounds = 3
 $exitCodeUpdateLoopDetected = 102
 
 if ($UpdateRunID) {
     $safeUpdateRunID = $UpdateRunID -replace '[^a-zA-Z0-9._-]', '_'
-    $updateLoopStatePath = "C:\Windows\Temp\packer-windows-update-loop-state-$safeUpdateRunID.json"
+    $updateLoopStatePath = "$env:SystemRoot\Temp\packer-windows-update-loop-state-$safeUpdateRunID.json"
 }
 
 function Write-LogInfo($message) {
@@ -509,6 +509,19 @@ if ($updatesToDownload.Count) {
         $delaySeconds = Get-RetryDelaySeconds $downloadAttempt
         Write-LogWarn "Download Windows updates failed with $downloadStatus (attempt $downloadAttempt/$downloadMaxRetries). Retrying in $delaySeconds seconds..."
         Start-Sleep -Seconds $delaySeconds
+    }
+
+    # Log per-update download results so individual failures are visible in Packer output.
+    for ($i = 0; $i -lt $updatesToDownload.Count; ++$i) {
+        $dlUpdate = $updatesToDownload.Item($i)
+        $dlResult = $downloadResult.GetUpdateResult($i)
+        if ($dlResult.ResultCode -ne 2) {
+            Write-LogWarn ("Download result for '{0}': ResultCode={1} ({2}), HResult=0x{3:X8}" -f
+                $dlUpdate.Title,
+                $dlResult.ResultCode,
+                (LookupOperationResultCode $dlResult.ResultCode),
+                [uint32]$dlResult.HResult)
+        }
     }
 }
 
