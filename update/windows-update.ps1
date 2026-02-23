@@ -517,6 +517,15 @@ if ($updatesToDownload.Count) {
         $dlSucceeded = $false
         for ($dlAttempt = 1; $dlAttempt -le $downloadMaxRetries; ++$dlAttempt) {
             $dlResult = $null
+
+            # --- ADD THIS TELEMETRY BLOCK ---
+            $os = Get-CimInstance Win32_OperatingSystem
+            $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+            $freeMemory = ($os.FreePhysicalMemory / 1024).ToString("0.0")
+            $freeDisk = ($disk.FreeSpace / 1024 / 1024 / 1024).ToString("0.0")
+            Write-Output "Resource Check before downloading '$dlTitle' (attempt $dlAttempt): Free Memory: $freeMemory MB, Free Disk: $freeDisk GB"
+            # --------------------------------
+
             try {
                 $dlResult = $dl.Download()
             }
