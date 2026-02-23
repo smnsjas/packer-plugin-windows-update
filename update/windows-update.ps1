@@ -201,41 +201,41 @@ function LookupOperationResultCode($code) {
 }
 
 $wuaHResultMessages = @{
-    ([uint32]0x00240005) = 'The system must be restarted to complete installation of the update (WU_S_REBOOT_REQUIRED)';
-    ([uint32]0x80240009) = 'Another conflicting operation was in progress (WU_E_OPERATIONINPROGRESS)';
-    ([uint32]0x80240016) = 'Install not allowed, likely due to pending restart or conflicting install (WU_E_INSTALL_NOT_ALLOWED)';
-    ([uint32]0x80240017) = 'Operation was not performed because there are no applicable updates (WU_E_NOT_APPLICABLE)';
-    ([uint32]0x80240019) = 'An exclusive update cannot be installed with other updates at the same time (WU_E_EXCLUSIVE_INSTALL_CONFLICT)';
-    ([uint32]0x8024001F) = 'Operation did not complete because the network connection was unavailable (WU_E_NO_CONNECTION)';
-    ([uint32]0x80240021) = 'Operation timed out (WU_E_TIME_OUT)';
-    ([uint32]0x80240022) = 'Operation failed for all the updates (WU_E_ALL_UPDATES_FAILED)';
-    ([uint32]0x80240032) = 'The search criteria string was invalid (WU_E_INVALID_CRITERIA)';
-    ([uint32]0x8024200D) = 'The update needs to be downloaded again (WU_E_UH_NEEDANOTHERDOWNLOAD)';
-    ([uint32]0x80242014) = 'The post-reboot operation for the update is still in progress (WU_E_UH_POSTREBOOTSTILLPENDING)';
-    ([uint32]0x80242017) = 'The servicing stack must be updated before this update can be installed (WU_E_UH_NEW_SERVICING_STACK_REQUIRED)';
-    ([uint32]0x8024201D) = 'The update handler is disabled until the system reboots (WU_E_UH_HANDLER_DISABLEDUNTILREBOOT)';
-    ([uint32]0x80244022) = 'The update service is temporarily overloaded (WU_E_PT_HTTP_STATUS_SERVICE_UNAVAIL)';
-    ([uint32]0x8024A007) = 'A reboot is in progress (WU_E_REBOOT_IN_PROGRESS)';
-    ([uint32]0x8024D00C) = 'Windows Update Agent requires a reboot to fix setup state (WU_E_SETUP_REBOOT_TO_FIX)';
-    ([uint32]0x8024D00E) = 'Windows Update Agent setup requires reboot to complete installation (WU_E_SETUP_REBOOTREQUIRED)'
+    ([uint32](([int64]0x00240005) -band [uint32]::MaxValue)) = 'The system must be restarted to complete installation of the update (WU_S_REBOOT_REQUIRED)';
+    ([uint32](([int64]0x80240009) -band [uint32]::MaxValue)) = 'Another conflicting operation was in progress (WU_E_OPERATIONINPROGRESS)';
+    ([uint32](([int64]0x80240016) -band [uint32]::MaxValue)) = 'Install not allowed, likely due to pending restart or conflicting install (WU_E_INSTALL_NOT_ALLOWED)';
+    ([uint32](([int64]0x80240017) -band [uint32]::MaxValue)) = 'Operation was not performed because there are no applicable updates (WU_E_NOT_APPLICABLE)';
+    ([uint32](([int64]0x80240019) -band [uint32]::MaxValue)) = 'An exclusive update cannot be installed with other updates at the same time (WU_E_EXCLUSIVE_INSTALL_CONFLICT)';
+    ([uint32](([int64]0x8024001F) -band [uint32]::MaxValue)) = 'Operation did not complete because the network connection was unavailable (WU_E_NO_CONNECTION)';
+    ([uint32](([int64]0x80240021) -band [uint32]::MaxValue)) = 'Operation timed out (WU_E_TIME_OUT)';
+    ([uint32](([int64]0x80240022) -band [uint32]::MaxValue)) = 'Operation failed for all the updates (WU_E_ALL_UPDATES_FAILED)';
+    ([uint32](([int64]0x80240032) -band [uint32]::MaxValue)) = 'The search criteria string was invalid (WU_E_INVALID_CRITERIA)';
+    ([uint32](([int64]0x8024200D) -band [uint32]::MaxValue)) = 'The update needs to be downloaded again (WU_E_UH_NEEDANOTHERDOWNLOAD)';
+    ([uint32](([int64]0x80242014) -band [uint32]::MaxValue)) = 'The post-reboot operation for the update is still in progress (WU_E_UH_POSTREBOOTSTILLPENDING)';
+    ([uint32](([int64]0x80242017) -band [uint32]::MaxValue)) = 'The servicing stack must be updated before this update can be installed (WU_E_UH_NEW_SERVICING_STACK_REQUIRED)';
+    ([uint32](([int64]0x8024201D) -band [uint32]::MaxValue)) = 'The update handler is disabled until the system reboots (WU_E_UH_HANDLER_DISABLEDUNTILREBOOT)';
+    ([uint32](([int64]0x80244022) -band [uint32]::MaxValue)) = 'The update service is temporarily overloaded (WU_E_PT_HTTP_STATUS_SERVICE_UNAVAIL)';
+    ([uint32](([int64]0x8024A007) -band [uint32]::MaxValue)) = 'A reboot is in progress (WU_E_REBOOT_IN_PROGRESS)';
+    ([uint32](([int64]0x8024D00C) -band [uint32]::MaxValue)) = 'Windows Update Agent requires a reboot to fix setup state (WU_E_SETUP_REBOOT_TO_FIX)';
+    ([uint32](([int64]0x8024D00E) -band [uint32]::MaxValue)) = 'Windows Update Agent setup requires reboot to complete installation (WU_E_SETUP_REBOOTREQUIRED)'
 }
 
 $rebootRequiredHResults = @(
-    [uint32]0x00240005,
-    [uint32]0x80240016,
-    [uint32]0x80242014,
-    [uint32]0x8024201D,
-    [uint32]0x8024A007,
-    [uint32]0x8024D00C,
-    [uint32]0x8024D00E
+    [uint32](([int64]0x00240005) -band [uint32]::MaxValue),
+    [uint32](([int64]0x80240016) -band [uint32]::MaxValue),
+    [uint32](([int64]0x80242014) -band [uint32]::MaxValue),
+    [uint32](([int64]0x8024201D) -band [uint32]::MaxValue),
+    [uint32](([int64]0x8024A007) -band [uint32]::MaxValue),
+    [uint32](([int64]0x8024D00C) -band [uint32]::MaxValue),
+    [uint32](([int64]0x8024D00E) -band [uint32]::MaxValue)
 )
 
 $servicingStackRequiredHResults = @(
-    [uint32]0x80242017
+    [uint32](([int64]0x80242017) -band [uint32]::MaxValue)
 )
 
 function LookupWuaHResultMessage($hresult) {
-    $unsignedHResult = [uint32]($hresult -band 0xFFFFFFFF)
+    $unsignedHResult = [uint32](([int64]$hresult) -band [uint32]::MaxValue)
     if ($wuaHResultMessages.ContainsKey($unsignedHResult)) {
         return $wuaHResultMessages[$unsignedHResult]
     }
@@ -243,7 +243,7 @@ function LookupWuaHResultMessage($hresult) {
 }
 
 function Test-HResultInSet($hresult, $set) {
-    $unsignedHResult = [uint32]($hresult -band 0xFFFFFFFF)
+    $unsignedHResult = [uint32](([int64]$hresult) -band [uint32]::MaxValue)
     return $set -contains $unsignedHResult
 }
 
@@ -520,7 +520,7 @@ if ($updatesToDownload.Count) {
                 $dlUpdate.Title,
                 $dlResult.ResultCode,
                 (LookupOperationResultCode $dlResult.ResultCode),
-                [uint32]$dlResult.HResult)
+                [uint32](([int64]$dlResult.HResult) -band [uint32]::MaxValue))
         }
     }
 }
@@ -542,7 +542,7 @@ if ($updatesToInstall.Count) {
             $installedUpdate = $updatesToInstall.Item($i)
             $updateResult = $installResult.GetUpdateResult($i)
             $updateResultCode = LookupOperationResultCode($updateResult.ResultCode)
-            $updateHResult = [uint32]$updateResult.HResult
+            $updateHResult = [uint32](([int64]$updateResult.HResult) -band [uint32]::MaxValue)
             $updateResultMessage = LookupWuaHResultMessage $updateHResult
             $updateRebootRequired = $updateResult.RebootRequired
 
