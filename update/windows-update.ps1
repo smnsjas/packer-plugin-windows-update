@@ -479,64 +479,114 @@ if ($updatesToInstall.Count -gt 1 -and $updatesToInstallExclusive.Count -gt 0) {
     Write-Output 'Warning: exclusive updates were detected and prioritized, but installation conflicts can still require additional reboot cycles.'
 }
 
+# Track how many updates failed to download so the post-install block can
+# distinguish "nothing downloaded" from "search returned zero updates".
+$downloadFailedCount = 0
 if ($updatesToDownload.Count) {
     $updateSize = ($updatesToDownloadSize / 1024 / 1024).ToString('0.##')
     Write-Output "Downloading Windows updates ($($updatesToDownload.Count) updates; $updateSize MB)..."
-    $updateDownloader = $updateSession.CreateUpdateDownloader()
     # https://docs.microsoft.com/en-us/windows/desktop/api/winnt/ns-winnt-_osversioninfoexa#remarks
-    if (($windowsOsVersion.Major -eq 6 -and $windowsOsVersion.Minor -gt 1) -or ($windowsOsVersion.Major -gt 6)) {
-        $updateDownloader.Priority = 4 # 1 (dpLow), 2 (dpNormal), 3 (dpHigh), 4 (dpExtraHigh).
+    $downloadPriority = if (($windowsOsVersion.Major -eq 6 -and $windowsOsVersion.Minor -gt 1) -or ($windowsOsVersion.Major -gt 6)) {
+        4 # 1 (dpLow), 2 (dpNormal), 3 (dpHigh), 4 (dpExtraHigh).
     }
     else {
-        # For versions lower then 6.2 highest prioirty is 3
-        $updateDownloader.Priority = 3 # 1 (dpLow), 2 (dpNormal), 3 (dpHigh).
+        3 # For versions lower than 6.2 highest priority is 3.
     }
-    $updateDownloader.Updates = $updatesToDownload
-    for ($downloadAttempt = 1; $downloadAttempt -le $downloadMaxRetries; ++$downloadAttempt) {
-        try {
-            $downloadResult = $updateDownloader.Download()
-        }
-        catch {
-            if ($downloadAttempt -eq $downloadMaxRetries) {
-                throw "Download Windows updates failed after $downloadAttempt attempts: $_"
+
+    # Download each update individually so that failures are isolated, retried separately,
+    # and Packer output contains a progress line per update during the (potentially multi-hour)
+    # download phase.  Batch downloading with a single Download() call was causing reboot loops:
+    # a SucceededWithErrors result on the batch would trigger an unconditional reboot, and after
+    # three identical rounds the loop-detection logic would abort the build.  Per-update downloads
+    # let us inspect each update's HResult and only request a reboot when that specific update
+    # requires one; updates that fail to download are left for the next round instead.
+    $downloadSucceededIdentities = @{}
+    for ($dlIdx = 0; $dlIdx -lt $updatesToDownload.Count; ++$dlIdx) {
+        $dlUpdate = $updatesToDownload.Item($dlIdx)
+        $dlTitle = $dlUpdate.Title
+        $dlIdentity = Get-UpdateIdentity $dlUpdate
+        $dlSize = ($dlUpdate.MaxDownloadSize / 1024 / 1024).ToString('0.##')
+        Write-Output "Downloading update $($dlIdx + 1)/$($updatesToDownload.Count): $dlTitle ($dlSize MB)..."
+
+        $singleColl = New-Object -ComObject 'Microsoft.Update.UpdateColl'
+        [void]$singleColl.Add($dlUpdate)
+        $dl = $updateSession.CreateUpdateDownloader()
+        $dl.Priority = $downloadPriority
+        $dl.Updates = $singleColl
+
+        $dlSucceeded = $false
+        for ($dlAttempt = 1; $dlAttempt -le $downloadMaxRetries; ++$dlAttempt) {
+            $dlResult = $null
+            try {
+                $dlResult = $dl.Download()
+            }
+            catch {
+                if ($dlAttempt -eq $downloadMaxRetries) {
+                    Write-LogWarn "Download of '$dlTitle' failed after $dlAttempt attempts: $_"
+                    break
+                }
+                $delaySecs = Get-RetryDelaySeconds $dlAttempt
+                Write-LogWarn "Download of '$dlTitle' threw an exception (attempt $dlAttempt/$downloadMaxRetries). Retrying in $delaySecs seconds..."
+                Start-Sleep -Seconds $delaySecs
+                continue
+            }
+            $perUpdateResult = $dlResult.GetUpdateResult(0)
+            $perResultCode = $perUpdateResult.ResultCode
+            $perHResult = ConvertTo-UInt32HResult $perUpdateResult.HResult
+
+            if ($dlResult.ResultCode -eq 2 -and $perResultCode -eq 2) {
+                Write-Output "Downloaded '$dlTitle' successfully."
+                $dlSucceeded = $true
+                break
             }
 
-            $delaySeconds = Get-RetryDelaySeconds $downloadAttempt
-            Write-LogWarn "Download Windows updates threw an exception (attempt $downloadAttempt/$downloadMaxRetries). Retrying in $delaySeconds seconds..."
-            Start-Sleep -Seconds $delaySeconds
-            continue
-        }
-        if ($downloadResult.ResultCode -eq 2) {
-            break
-        }
-        if ($downloadResult.ResultCode -eq 3) {
-            Write-Output "Download Windows updates succeeded with errors. Will retry after the next reboot."
-            $rebootRequired = $true
-            break
+            # SucceededWithErrors: the download finished but with per-update issues.
+            # Do NOT trigger a full reboot loop -- only reboot if the per-update HResult
+            # explicitly requires it; otherwise log and skip to the next update.
+            if ($dlResult.ResultCode -eq 3 -or $perResultCode -eq 3) {
+                $hrMsg = LookupWuaHResultMessage $perHResult
+                Write-LogWarn ("Download of '$dlTitle' succeeded with errors: HResult=0x{0:X8} ({1})" -f $perHResult, $hrMsg)
+                if (Test-HResultInSet $perHResult $rebootRequiredHResults) {
+                    Write-LogWarn "A pending reboot is required before '$dlTitle' can complete downloading."
+                    $rebootRequired = $true
+                }
+                break  # Do not retry SucceededWithErrors; it will be retried next round.
+            }
+
+            if ($dlAttempt -eq $downloadMaxRetries) {
+                $dlStatus = LookupOperationResultCode($dlResult.ResultCode)
+                Write-LogWarn ("Download of '$dlTitle' failed after $dlAttempt attempts: ResultCode={0} ({1}), HResult=0x{2:X8}" -f
+                    $perResultCode, $dlStatus, $perHResult)
+                break
+            }
+
+            $dlStatus = LookupOperationResultCode($dlResult.ResultCode)
+            $delaySecs = Get-RetryDelaySeconds $dlAttempt
+            Write-LogWarn "Download of '$dlTitle' failed with $dlStatus (attempt $dlAttempt/$downloadMaxRetries). Retrying in $delaySecs seconds..."
+            Start-Sleep -Seconds $delaySecs
         }
 
-        if ($downloadAttempt -eq $downloadMaxRetries) {
-            $downloadStatus = LookupOperationResultCode($downloadResult.ResultCode)
-            throw "Download Windows updates failed after $downloadAttempt attempts with status $downloadStatus."
+        if ($dlSucceeded) {
+            $downloadSucceededIdentities[$dlIdentity] = $true
         }
-
-        $downloadStatus = LookupOperationResultCode($downloadResult.ResultCode)
-        $delaySeconds = Get-RetryDelaySeconds $downloadAttempt
-        Write-LogWarn "Download Windows updates failed with $downloadStatus (attempt $downloadAttempt/$downloadMaxRetries). Retrying in $delaySeconds seconds..."
-        Start-Sleep -Seconds $delaySeconds
     }
 
-    # Log per-update download results so individual failures are visible in Packer output.
-    for ($i = 0; $i -lt $updatesToDownload.Count; ++$i) {
-        $dlUpdate = $updatesToDownload.Item($i)
-        $dlResult = $downloadResult.GetUpdateResult($i)
-        if ($dlResult.ResultCode -ne 2) {
-            Write-LogWarn ("Download result for '{0}': ResultCode={1} ({2}), HResult=0x{3:X8}" -f
-                $dlUpdate.Title,
-                $dlResult.ResultCode,
-                (LookupOperationResultCode $dlResult.ResultCode),
-                (ConvertTo-UInt32HResult $dlResult.HResult))
+    # Rebuild the install queue to only include updates that downloaded successfully.
+    # Updates that failed to download are left for the next round; the loop-detection
+    # state machine will catch genuine infinite-download cycles.
+    $updatesToInstall = New-Object -ComObject 'Microsoft.Update.UpdateColl'
+    foreach ($srcColl in @($updatesToInstallServicingStack, $updatesToInstallExclusive, $updatesToInstallRegular)) {
+        for ($i = 0; $i -lt $srcColl.Count; ++$i) {
+            $u = $srcColl.Item($i)
+            if ($downloadSucceededIdentities.ContainsKey((Get-UpdateIdentity $u))) {
+                [void]$updatesToInstall.Add($u)
+            }
         }
+    }
+
+    $downloadFailedCount = $updatesToDownload.Count - $downloadSucceededIdentities.Count
+    if ($downloadFailedCount -gt 0) {
+        Write-LogWarn "$downloadFailedCount of $($updatesToDownload.Count) update(s) failed to download and will be retried in a subsequent round."
     }
 }
 
@@ -609,7 +659,12 @@ if ($updatesToInstall.Count) {
 }
 else {
     ExitWhenRebootRequired $rebootRequired
-    Write-Output 'No Windows updates found'
+    if ($downloadFailedCount -gt 0) {
+        Write-LogWarn "All $downloadFailedCount update(s) failed to download; they will be retried in the next round."
+    }
+    else {
+        Write-Output 'No Windows updates found'
+    }
 }
 
 ExitWithCode 0
