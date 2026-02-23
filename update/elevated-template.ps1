@@ -120,6 +120,14 @@ elseif (Test-Path $log) {
 }
 $result = $t.LastTaskResult
 if (Test-Path $log) {
+    if ($result -ne 0) {
+        Start-Sleep -Milliseconds 500
+        Write-Output ""
+        Write-Output "--- TASK FAILED WITH EXIT CODE $result ---"
+        Write-Output "--- FULL LOG DUMP TO ENSURE EXCEPTION VISIBILITY ---"
+        Get-Content $log
+        Write-Output "----------------------------------------------------"
+    }
     Remove-Item $log -Force -ErrorAction SilentlyContinue | Out-Null
 }
 
