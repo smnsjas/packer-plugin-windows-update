@@ -6,8 +6,8 @@ $f = $null
 $logStream = $null
 trap {
     Write-Output "ERROR: $_"
-    Write-Output (($_.ScriptStackTrace -split '\r?\n') -replace '^(.*)$','ERROR: $1')
-    Write-Output (($_.Exception.ToString() -split '\r?\n') -replace '^(.*)$','ERROR EXCEPTION: $1')
+    Write-Output (($_.ScriptStackTrace -split '\r?\n') -replace '^(.*)$', 'ERROR: $1')
+    Write-Output (($_.Exception.ToString() -split '\r?\n') -replace '^(.*)$', 'ERROR EXCEPTION: $1')
     if ($null -ne $logStream) { try { $logStream.Dispose() } catch {} }
     if ($null -ne $f) { try { $f.DeleteTask("\$name", 0) } catch {} }
     Exit 1
@@ -103,10 +103,7 @@ do {
     $currentDate = Get-Date
     if ($currentDate.Subtract($startDate) -ge $reportProgressInterval) {
         $startDate = $currentDate
-        $cpuUsage = (Get-CimInstance CIM_Processor | Measure-Object -Property LoadPercentage -Average).Average / 100
-        $os = Get-CimInstance Win32_OperatingSystem
-        $memoryUsage = 1 - $os.FreePhysicalMemory / $os.TotalVisibleMemorySize
-        Write-Output ("Waiting for operation to complete (system performance: {0:P0} cpu; {1:P0} memory)..." -f $cpuUsage,$memoryUsage)
+        Write-Output "Waiting for operation to complete..."
     }
 } while (!($t.state -eq 3))
 # Final drain: read any output written after the last poll cycle.
@@ -116,7 +113,8 @@ if ($null -ne $logStream) {
     }
     $logStream.Dispose()
     $logStream = $null
-} elseif (Test-Path $log) {
+}
+elseif (Test-Path $log) {
     # Task completed before the log was opened (very fast execution).
     Get-Content $log
 }
