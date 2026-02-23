@@ -231,7 +231,7 @@ func (p *Provisioner) update(ctx context.Context, ui packer.Ui, comm packer.Comm
 		}
 		var exitStatus = cmd.ExitStatus()
 		if !ui.finished {
-			err = fmt.Errorf("windows update script did not finish")
+			err = fmt.Errorf("windows update script did not finish (exit status: %d)", exitStatus)
 			if try == p.config.UpdateMaxRetries {
 				return restartPending, err
 			}
