@@ -47,8 +47,8 @@ $t.XmlText = @'
     </Settings>
     <Actions Context="Author">
         <Exec>
-            <Command>cmd</Command>
-            <Arguments>/c {{.Command}} &gt;%SYSTEMROOT%\Temp\{{.TaskName}}.out 2&gt;&amp;1</Arguments>
+            <Command>powershell.exe</Command>
+            <Arguments>-ExecutionPolicy Bypass -NoProfile -NonInteractive -Command "Start-Transcript -Path '%SYSTEMROOT%\Temp\{{.TaskName}}.out' -Force; try { &amp; { {{.Command}} } } finally { Stop-Transcript }"</Arguments>
         </Exec>
     </Actions>
 </Task>
