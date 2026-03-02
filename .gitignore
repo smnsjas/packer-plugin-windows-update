@@ -6,3 +6,8 @@ tmp*
 output-*/
 *.log
 *.exe
+test-loop*
+psrp_out*
+compare_pypsrp.py
+diff.txt
+go-psrp-project-plan.md
