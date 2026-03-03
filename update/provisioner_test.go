@@ -24,19 +24,19 @@ func TestUpdateExitStatusError(t *testing.T) {
 		},
 		{
 			name:        "reboot required",
-			exitStatus:  windowsUpdateExitCodeReboot,
+			exitStatus:  exitCodeReboot,
 			wantRestart: true,
 			wantErr:     false,
 		},
 		{
 			name:        "windows 2012 reboot required",
-			exitStatus:  2147942501,
+			exitStatus:  exitCodeWin2012Reboot,
 			wantRestart: true,
 			wantErr:     false,
 		},
 		{
 			name:        "loop detected",
-			exitStatus:  windowsUpdateExitCodeLoop,
+			exitStatus:  exitCodeLoop,
 			wantRestart: false,
 			wantErr:     true,
 			errContains: "repeated update loop",
@@ -72,38 +72,6 @@ func TestUpdateExitStatusError(t *testing.T) {
 	}
 }
 
-func TestWindowsUpdateCommandIncludesUpdateRunID(t *testing.T) {
-	t.Parallel()
-	p := &Provisioner{}
-	p.config.UpdateLimit = 25
-	p.updateRunID = "run-123"
-
-	command := p.windowsUpdateCommand()
-	if !strings.Contains(command, "-UpdateRunID") {
-		t.Fatalf("expected command to include -UpdateRunID, got: %s", command)
-	}
-	if !strings.Contains(command, "run-123") {
-		t.Fatalf("expected command to include run id value, got: %s", command)
-	}
-}
-
-func TestWaitRetryDelayCancellation(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	start := time.Now()
-	err := waitRetryDelay(ctx, time.Second)
-	elapsed := time.Since(start)
-
-	if err == nil {
-		t.Fatalf("expected cancellation error, got nil")
-	}
-	if elapsed > 200*time.Millisecond {
-		t.Fatalf("expected quick return on cancellation, took %s", elapsed)
-	}
-}
-
 func TestPrepareDefaults(t *testing.T) {
 	t.Parallel()
 	p := &Provisioner{}
@@ -114,17 +82,96 @@ func TestPrepareDefaults(t *testing.T) {
 	if p.config.RestartTimeout != 4*time.Hour {
 		t.Errorf("RestartTimeout = %v; want %v", p.config.RestartTimeout, 4*time.Hour)
 	}
-	if p.config.Username != "SYSTEM" {
-		t.Errorf("Username = %q; want %q", p.config.Username, "SYSTEM")
-	}
 	if p.config.SearchCriteria != "BrowseOnly=0 and IsInstalled=0" {
 		t.Errorf("SearchCriteria = %q; want %q", p.config.SearchCriteria, "BrowseOnly=0 and IsInstalled=0")
 	}
 	if p.config.UpdateLimit != 1000 {
 		t.Errorf("UpdateLimit = %d; want 1000", p.config.UpdateLimit)
 	}
-	if p.config.UpdateMaxRetries != 5 {
-		t.Errorf("UpdateMaxRetries = %d; want 5", p.config.UpdateMaxRetries)
+	if p.config.MaxRetries != 5 {
+		t.Errorf("MaxRetries = %d; want 5", p.config.MaxRetries)
+	}
+}
+
+func TestPrepareCustomValues(t *testing.T) {
+	t.Parallel()
+	p := &Provisioner{}
+	err := p.Prepare(map[string]interface{}{
+		"restart_timeout": "2h",
+		"search_criteria": "IsInstalled=0",
+		"filters":         []string{"exclude:$_.Title -like '*Preview*'"},
+		"update_limit":    50,
+		"max_retries":     3,
+	})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+
+	if p.config.RestartTimeout != 2*time.Hour {
+		t.Errorf("RestartTimeout = %v; want %v", p.config.RestartTimeout, 2*time.Hour)
+	}
+	if p.config.SearchCriteria != "IsInstalled=0" {
+		t.Errorf("SearchCriteria = %q; want %q", p.config.SearchCriteria, "IsInstalled=0")
+	}
+	if len(p.config.Filters) != 1 || p.config.Filters[0] != "exclude:$_.Title -like '*Preview*'" {
+		t.Errorf("Filters = %v; want [exclude:$_.Title -like '*Preview*']", p.config.Filters)
+	}
+	if p.config.UpdateLimit != 50 {
+		t.Errorf("UpdateLimit = %d; want 50", p.config.UpdateLimit)
+	}
+	if p.config.MaxRetries != 3 {
+		t.Errorf("MaxRetries = %d; want 3", p.config.MaxRetries)
+	}
+}
+
+func TestWindowsUpdateCommand(t *testing.T) {
+	t.Parallel()
+	p := &Provisioner{}
+	p.config.SearchCriteria = "BrowseOnly=0 and IsInstalled=0"
+	p.config.Filters = []string{"include:$true"}
+	p.config.UpdateLimit = 25
+	p.updateRunID = "run-123"
+
+	command := p.windowsUpdateCommand()
+
+	expectedParts := []string{
+		"& 'C:/Windows/Temp/packer-windows-update.ps1'",
+		"-SearchCriteria 'BrowseOnly=0 and IsInstalled=0'",
+		"-Filters 'include:$true'",
+		"-UpdateLimit 25",
+		"-UpdateRunID 'run-123'",
+	}
+
+	for _, part := range expectedParts {
+		if !strings.Contains(command, part) {
+			t.Errorf("expected command to contain %q, got: %s", part, command)
+		}
+	}
+}
+
+func TestWindowsUpdateCommandNoFilters(t *testing.T) {
+	t.Parallel()
+	p := &Provisioner{}
+	p.config.SearchCriteria = "BrowseOnly=0 and IsInstalled=0"
+	p.config.UpdateLimit = 1000
+	p.updateRunID = "run-456"
+
+	command := p.windowsUpdateCommand()
+
+	if strings.Contains(command, "-Filters") {
+		t.Errorf("expected command to omit -Filters when none configured, got: %s", command)
+	}
+}
+
+func TestWindowsUpdateCheckForRebootRequiredCommand(t *testing.T) {
+	t.Parallel()
+	p := &Provisioner{}
+
+	command := p.windowsUpdateCheckForRebootRequiredCommand()
+
+	expected := "& 'C:/Windows/Temp/packer-windows-update.ps1' -OnlyCheckForRebootRequired"
+	if command != expected {
+		t.Errorf("got %q; want %q", command, expected)
 	}
 }
 
@@ -240,5 +287,22 @@ func TestEscapePowerShellString(t *testing.T) {
 				t.Errorf("escapePowerShellString(%q) = %q; want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWaitRetryDelayCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err := waitRetryDelay(ctx, time.Second)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected cancellation error, got nil")
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("expected quick return on cancellation, took %s", elapsed)
 	}
 }
