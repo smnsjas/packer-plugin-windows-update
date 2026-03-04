@@ -559,8 +559,6 @@ for ($i = 0; $i -lt $searchResult.Updates.Count; ++$i) {
         continue
     }
 
-    Write-Output "Found $updateSummary"
-
     [void]$update.AcceptEula()
 
     $updatesToDownloadSize += $updateMaxDownloadSize
