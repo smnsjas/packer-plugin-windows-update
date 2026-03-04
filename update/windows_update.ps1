@@ -372,7 +372,32 @@ function Install-UpdatePhase {
     $servicingStackRequiredDetected = $false
     $isTerminalInstallError = $false
     try {
-        $installResult = $UpdateInstaller.Install()
+        # Use async BeginInstall so we can report which update is currently installing.
+        $installJob = $UpdateInstaller.BeginInstall($null, $null, $null)
+        $lastReportedPct = -1
+        $lastReportedIdx = -1
+        $lastReportTime = [DateTime]::UtcNow
+        while (-not $installJob.IsCompleted) {
+            Start-Sleep -Seconds 5
+            try {
+                $prog = $installJob.GetProgress()
+                $pct = [int]$prog.PercentComplete
+                $curIdx = [int]$prog.CurrentUpdateIndex
+                $elapsed = ([DateTime]::UtcNow - $lastReportTime).TotalSeconds
+                if ($curIdx -ne $lastReportedIdx -or ($pct - $lastReportedPct -ge 5) -or $elapsed -ge 30) {
+                    $curTitle = if ($curIdx -ge 0 -and $curIdx -lt $UpdateCollection.Count) {
+                        $UpdateCollection.Item($curIdx).Title
+                    } else { '(completing...)' }
+                    Write-Output ("  [$PhaseName] Installing [{0}/{1}]: '{2}' - {3}% overall" -f `
+                        ($curIdx + 1), $UpdateCollection.Count, $curTitle, $pct)
+                    $lastReportedPct = $pct
+                    $lastReportedIdx = $curIdx
+                    $lastReportTime = [DateTime]::UtcNow
+                }
+            } catch {}
+        }
+        $installResult = $UpdateInstaller.EndInstall($installJob)
+        try { $installJob.CleanUp() } catch {}
 
         if ($installResult.RebootRequired) {
             $result.RebootRequired = $true
@@ -657,18 +682,43 @@ if ($updatesToDownload.Count) {
         $dl.Priority = $downloadPriority
         $dl.Updates = $singleColl
 
+        # Resource check once before the retry loop (not on every retry).
+        $os = Get-CimInstance Win32_OperatingSystem
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+        $freeMemory = ($os.FreePhysicalMemory / 1024).ToString('0.0')
+        $freeDisk = ($disk.FreeSpace / 1024 / 1024 / 1024).ToString('0.0')
+        Write-Output "  Resources before download: Free Memory=$freeMemory MB, Free Disk=$freeDisk GB"
+
         $dlSucceeded = $false
         for ($dlAttempt = 1; $dlAttempt -le $downloadMaxRetries; ++$dlAttempt) {
             $dlResult = $null
 
-            $os = Get-CimInstance Win32_OperatingSystem
-            $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-            $freeMemory = ($os.FreePhysicalMemory / 1024).ToString("0.0")
-            $freeDisk = ($disk.FreeSpace / 1024 / 1024 / 1024).ToString("0.0")
-            Write-Output "Resource Check before downloading '$dlTitle' (attempt $dlAttempt): Free Memory: $freeMemory MB, Free Disk: $freeDisk GB"
-
             try {
-                $dlResult = $dl.Download()
+                # Use async BeginDownload so we can poll and report progress.
+                $dlJob = $dl.BeginDownload($null, $null, $null)
+                $lastReportedPct = -1
+                $lastReportTime = [DateTime]::UtcNow
+                while (-not $dlJob.IsCompleted) {
+                    Start-Sleep -Seconds 5
+                    try {
+                        $prog = $dlJob.GetProgress()
+                        $pct = [int]$prog.PercentComplete
+                        $elapsed = ([DateTime]::UtcNow - $lastReportTime).TotalSeconds
+                        if ($pct -ne $lastReportedPct -and ($pct - $lastReportedPct -ge 5 -or $elapsed -ge 30)) {
+                            $dlMB = ($dlUpdate.MaxDownloadSize / 1024 / 1024)
+                            $doneMB = try { [double]$prog.TotalBytesDownloaded / 1024 / 1024 } catch { 0 }
+                            if ($dlMB -gt 0 -and $doneMB -gt 0) {
+                                Write-Output ("  Downloading: {0}% ({1:0.#} / {2:0.##} MB)" -f $pct, $doneMB, $dlMB)
+                            } else {
+                                Write-Output "  Downloading: $pct%"
+                            }
+                            $lastReportedPct = $pct
+                            $lastReportTime = [DateTime]::UtcNow
+                        }
+                    } catch {}
+                }
+                $dlResult = $dl.EndDownload($dlJob)
+                try { $dlJob.CleanUp() } catch {}
             }
             catch {
                 if ($dlAttempt -eq $downloadMaxRetries) {
